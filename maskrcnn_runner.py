@@ -2,8 +2,8 @@ import argparse
 from pathlib import Path
 import cv2
 
-from .yolo_utils import load_yolo_model, detect_yolo_image
-from .image_utils import annotate_image, save_detections_json
+from maskrcnn_utils import load_maskrcnn_model, detect_maskrcnn_image
+from image_utils_maskrcnn import annotate_masks, save_masks_json
 
 try:
     from sahi import AutoDetectionModel
@@ -12,46 +12,49 @@ try:
 except ImportError:
     SAHI_AVAILABLE = False
 
-def run_yolo_detection(
+def run_maskrcnn_detection(
     input_dir: Path,
     output_dir: Path,
-    model_path: str,
     conf_thresh: float = 0.5,
     device: str = "cpu",
     use_tiling: bool = False,
+    model_type: str = "maskrcnn_resnet50_fpn",
     slice_height: int = 640,
     slice_width: int = 640,
     overlap_height_ratio: float = 0.2,
     overlap_width_ratio: float = 0.2
 ):
     """
-    Run YOLO on all images in input_dir.
+    Run Mask R-CNN on all images in input_dir.
     If use_tiling=True, uses SAHI to slice images.
-    Saves annotated images under output_dir/annotated/ and a detections.json.
+    Saves annotated images under output_dir/annotated/ and masks.json.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     img_out = output_dir / "annotated"
     img_out.mkdir(exist_ok=True)
 
-    # Load YOLO model
-    yolo_model = load_yolo_model(model_path, device)
+    # Load base Mask R-CNN
+    model = load_maskrcnn_model(device, model_name=model_type)
 
-    # Prepare SAHI model if tiling
+    # Prepare SAHI if tiling
     if use_tiling:
         if not SAHI_AVAILABLE:
             raise RuntimeError("SAHI not installed; cannot use tiled inference.")
         sahi_model = AutoDetectionModel.from_pretrained(
-            model_type="yolov8",
-            model_path=model_path,
-            confidence_threshold=conf_thresh,
+            model_type="mmdet",
+            model_path=model_type,                 # SAHI expects a detectron2/mmdet name
+            detection_threshold=conf_thresh,
             device=device,
+            detection_category="instance_segmentation"
         )
 
-    results = {}
+    all_masks = {}
+
     for img_path in sorted(input_dir.iterdir()):
         if not img_path.is_file():
             continue
 
+        img = cv2.imread(str(img_path))
         if use_tiling:
             sahi_pred = get_sliced_prediction(
                 str(img_path),
@@ -61,53 +64,43 @@ def run_yolo_detection(
                 overlap_height_ratio=overlap_height_ratio,
                 overlap_width_ratio=overlap_width_ratio,
             )
-            dets = [
-                {
-                    "bbox": [
-                        int(obj.bbox.minx), int(obj.bbox.miny),
-                        int(obj.bbox.maxx), int(obj.bbox.maxy)
-                    ],
-                    "score": float(obj.score.value),
-                    "class_id": int(obj.category.value)
-                }
-                for obj in sahi_pred.object_prediction_list
-            ]
+            masks = [obj.mask for obj in sahi_pred.object_prediction_list]
         else:
-            img = cv2.imread(str(img_path))
-            dets = detect_yolo_image(yolo_model, img, conf_thresh)
+            masks = detect_maskrcnn_image(model, img, conf_thresh)
 
         # Annotate & save
-        img = cv2.imread(str(img_path))
-        annotated = annotate_image(img, dets)
+        annotated = annotate_masks(img, masks)
         cv2.imwrite(str(img_out / img_path.name), annotated)
-        results[img_path.name] = dets
+        all_masks[img_path.name] = [m["mask"] if isinstance(m, dict) else m for m in masks]
 
-    # Save JSON
-    save_detections_json(results, output_dir / "detections.json")
+    # Save masks.json
+    save_masks_json(all_masks, output_dir / "masks.json")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser("YOLO batch runner")
+    parser = argparse.ArgumentParser("MaskRCNN batch runner")
     parser.add_argument("--input-dir",  type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--model",      required=True)
     parser.add_argument("--conf-thresh", type=float, default=0.5)
     parser.add_argument("--device",      default="cpu")
     parser.add_argument("--use-tiling", action="store_true",
-                        help="Use SAHI tiled inference")
+                        help="Enable SAHI tiled inference")
+    parser.add_argument("--model-type", type=str,
+                        default="maskrcnn_resnet50_fpn",
+                        help="TorchVision model name")
     parser.add_argument("--slice-height", type=int, default=640)
     parser.add_argument("--slice-width",  type=int, default=640)
     parser.add_argument("--overlap-height-ratio", type=float, default=0.2)
     parser.add_argument("--overlap-width-ratio",  type=float, default=0.2)
     args = parser.parse_args()
 
-    run_yolo_detection(
+    run_maskrcnn_detection(
         input_dir=args.input_dir,
         output_dir=args.output_dir,
-        model_path=args.model,
         conf_thresh=args.conf_thresh,
         device=args.device,
         use_tiling=args.use_tiling,
+        model_type=args.model_type,
         slice_height=args.slice_height,
         slice_width=args.slice_width,
         overlap_height_ratio=args.overlap_height_ratio,
