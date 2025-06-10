@@ -1,4 +1,4 @@
-import argparse
+import yaml
 from pathlib import Path
 import cv2
 
@@ -12,41 +12,28 @@ try:
 except ImportError:
     SAHI_AVAILABLE = False
 
+def run_yolo_detection(cfg: dict):
+    input_dir = Path(cfg["input_dir"])
+    output_dir = Path(cfg["output_dir"])
+    annotated_subdir = cfg.get("annotated_subdir", "annotated")
+    detections_file = cfg.get("detections_file", "detections.json")
 
-def run_yolo_detection(
-    input_dir: Path,
-    output_dir: Path,
-    model_path: str,
-    conf_thresh: float = 0.5,
-    device: str = "cpu",
-    use_tiling: bool = False,
-    model_type: str = "yolov8",
-    slice_height: int = 640,
-    slice_width: int = 640,
-    overlap_height_ratio: float = 0.2,
-    overlap_width_ratio: float = 0.2
-):
-    """
-    Run YOLO inference on all images in input_dir.
-    If use_tiling=True, uses SAHI to slice images.
-    Saves annotated images under output_dir/annotated/ and a detections.json.
-    """
     output_dir.mkdir(parents=True, exist_ok=True)
-    img_out = output_dir / "annotated"
+    img_out = output_dir / annotated_subdir
     img_out.mkdir(exist_ok=True)
 
-    # Load YOLO model
-    yolo_model = load_yolo_model(model_path, device)
+    # Load model
+    model = load_yolo_model(cfg["model_path"], cfg["device"])
 
-    # Prepare SAHI model if tiling
-    if use_tiling:
+    # Prepare tiled inference if requested
+    if cfg.get("use_tiling", False):
         if not SAHI_AVAILABLE:
             raise RuntimeError("SAHI not installed; cannot use tiled inference.")
         sahi_model = AutoDetectionModel.from_pretrained(
-            model_type=model_type,
-            model_path=model_path,
-            confidence_threshold=conf_thresh,
-            device=device,
+            model_type=cfg["model_type"],
+            model_path=cfg["model_path"],
+            confidence_threshold=cfg["conf_thresh"],
+            device=cfg["device"],
         )
 
     results = {}
@@ -54,14 +41,14 @@ def run_yolo_detection(
         if not img_path.is_file():
             continue
 
-        if use_tiling:
+        if cfg.get("use_tiling", False):
             sahi_pred = get_sliced_prediction(
                 str(img_path),
                 sahi_model,
-                slice_height=slice_height,
-                slice_width=slice_width,
-                overlap_height_ratio=overlap_height_ratio,
-                overlap_width_ratio=overlap_width_ratio,
+                slice_height=cfg["slice_height"],
+                slice_width=cfg["slice_width"],
+                overlap_height_ratio=cfg["overlap_height_ratio"],
+                overlap_width_ratio=cfg["overlap_width_ratio"],
             )
             dets = [
                 {
@@ -76,44 +63,21 @@ def run_yolo_detection(
             ]
         else:
             img = cv2.imread(str(img_path))
-            dets = detect_yolo_image(yolo_model, img, conf_thresh)
+            dets = detect_yolo_image(model, img, cfg["conf_thresh"])
 
-        # Annotate & save
-        img = cv2.imread(str(img_path))
-        annotated = annotate_image(img, dets)
+        # Annotate and save
+        annotated = annotate_image(cv2.imread(str(img_path)), dets)
         cv2.imwrite(str(img_out / img_path.name), annotated)
         results[img_path.name] = dets
 
-    # Save JSON
-    save_detections_json(results, output_dir / "detections.json")
+    # Save JSON results
+    save_detections_json(results, output_dir / detections_file)
 
+def main():
+    # Load configuration and run
+    config = yaml.safe_load(open("config.yaml", "r"))
+    yolo_cfg = config.get("yolo", {})
+    run_yolo_detection(yolo_cfg)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser("YOLO batch runner")
-    parser.add_argument("--input-dir",  type=Path, required=True)
-    parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--model",      required=True)
-    parser.add_argument("--conf-thresh", type=float, default=0.5)
-    parser.add_argument("--device",      default="cpu")
-    parser.add_argument("--use-tiling", "--use-tiling", action="store_true")    
-    parser.add_argument("--model-type", type=str, default="yolov11",
-                        help="Model type for SAHI (e.g. yolov8, yolov5)")
-    parser.add_argument("--slice-height", type=int, default=640)
-    parser.add_argument("--slice-width",  type=int, default=640)
-    parser.add_argument("--overlap-height-ratio", type=float, default=0.2)
-    parser.add_argument("--overlap-width-ratio",  type=float, default=0.2)
-    args = parser.parse_args()
-
-    run_yolo_detection(
-        input_dir=args.input_dir,
-        output_dir=args.output_dir,
-        model_path=args.model,
-        conf_thresh=args.conf_thresh,
-        device=args.device,
-        use_tiling=args.use_tiling,
-        model_type=args.model_type,
-        slice_height=args.slice_height,
-        slice_width=args.slice_width,
-        overlap_height_ratio=args.overlap_height_ratio,
-        overlap_width_ratio=args.overlap_width_ratio
-    )
+    main()

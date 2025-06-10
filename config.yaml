@@ -1,0 +1,40 @@
+# config.yaml
+
+yolo:
+  # Paths
+  input_dir: "images/"
+  output_dir: "out/"
+  model_path: "model_weights/best_mandarina_2.pt"
+
+  # Inference settings
+  conf_thresh: 0.5
+  device: "cpu"
+  use_tiling: false
+  model_type: "yolov11"
+  slice_height: 640
+  slice_width: 640
+  overlap_height_ratio: 0.2
+  overlap_width_ratio: 0.2
+
+  # Output filenames
+  annotated_subdir: "annotated"
+  detections_file: "detections.json"
+
+maskrcnn:
+  # Paths
+  input_dir: "data/images"
+  output_dir: "out/maskrcnn"
+  
+  # Inference settings
+  conf_thresh: 0.5
+  device: "cpu"
+  use_tiling: false
+  model_type: "maskrcnn_resnet50_fpn"
+  slice_height: 640
+  slice_width: 640
+  overlap_height_ratio: 0.2
+  overlap_width_ratio: 0.2
+
+  # Output filenames
+  annotated_subdir: "annotated"
+  masks_file: "masks.json"

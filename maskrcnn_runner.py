@@ -3,7 +3,7 @@ from pathlib import Path
 import cv2
 
 from maskrcnn_utils import load_maskrcnn_model, detect_maskrcnn_image
-from image_utils_maskrcnn import annotate_masks, save_masks_json
+from image_utils import annotate_masks, save_masks_json
 
 try:
     from sahi import AutoDetectionModel
