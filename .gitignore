@@ -1,4 +1,7 @@
 .venv
+v_env
 model_weights
 images
 out
+images_berries
+out_berries

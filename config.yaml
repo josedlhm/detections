@@ -8,7 +8,7 @@ yolo:
 
   # Inference settings
   conf_thresh: 0.5
-  device: "cpu"
+  device: "cuda:0"
   use_tiling: false
   model_type: "yolov11"
   slice_height: 640
@@ -22,19 +22,22 @@ yolo:
 
 maskrcnn:
   # Paths
-  input_dir: "data/images"
-  output_dir: "out/maskrcnn"
-  
+  input_dir: "images_berries"
+  output_dir: "out_berries"
+
+  # Detectron2 configuration
+  config_path: "model_weights/berry_model-4.yaml"
+  weights_path: "model_weights/berry_model-4.pth"
+
   # Inference settings
-  conf_thresh: 0.5
-  device: "cpu"
-  use_tiling: false
-  model_type: "maskrcnn_resnet50_fpn"
-  slice_height: 640
-  slice_width: 640
+  conf_thresh: 0.7
+  device: "cuda:0"        # or "cuda"
+  use_tiling: true
+  slice_height: 480
+  slice_width: 240
   overlap_height_ratio: 0.2
   overlap_width_ratio: 0.2
 
   # Output filenames
   annotated_subdir: "annotated"
-  masks_file: "masks.json"
+  masks_file: "detections.json"

@@ -1,9 +1,11 @@
-import argparse
+import yaml
 from pathlib import Path
 import cv2
-
-from maskrcnn_utils import load_maskrcnn_model, detect_maskrcnn_image
-from image_utils import annotate_masks, save_masks_json
+import numpy as np
+from detectron2.config import get_cfg
+from detectron2.engine import DefaultPredictor
+from detectron2.utils.visualizer import Visualizer
+from detectron2.data import MetadataCatalog
 
 try:
     from sahi import AutoDetectionModel
@@ -12,97 +14,96 @@ try:
 except ImportError:
     SAHI_AVAILABLE = False
 
-def run_maskrcnn_detection(
-    input_dir: Path,
-    output_dir: Path,
-    conf_thresh: float = 0.5,
-    device: str = "cpu",
-    use_tiling: bool = False,
-    model_type: str = "maskrcnn_resnet50_fpn",
-    slice_height: int = 640,
-    slice_width: int = 640,
-    overlap_height_ratio: float = 0.2,
-    overlap_width_ratio: float = 0.2
-):
-    """
-    Run Mask R-CNN on all images in input_dir.
-    If use_tiling=True, uses SAHI to slice images.
-    Saves annotated images under output_dir/annotated/ and masks.json.
-    """
+from image_utils import save_masks_json
+
+
+def run_maskrcnn(cfg: dict):
+    input_dir = Path(cfg["input_dir"])
+    output_dir = Path(cfg["output_dir"])
+    annotated_subdir = cfg.get("annotated_subdir", "annotated")
+    masks_file = cfg.get("masks_file", "masks.json")
+
     output_dir.mkdir(parents=True, exist_ok=True)
-    img_out = output_dir / "annotated"
+    img_out = output_dir / annotated_subdir
     img_out.mkdir(exist_ok=True)
 
-    # Load base Mask R-CNN
-    model = load_maskrcnn_model(device, model_name=model_type)
+    # Detectron2 predictor setup
+    detect_cfg = get_cfg()
+    detect_cfg.merge_from_file(str(cfg["config_path"]))
+    detect_cfg.MODEL.WEIGHTS = str(cfg["weights_path"])
+    detect_cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = cfg.get("conf_thresh", 0.5)
+    detect_cfg.MODEL.DEVICE = cfg.get("device", "cpu")
+    predictor = DefaultPredictor(detect_cfg)
 
-    # Prepare SAHI if tiling
+    meta = None
+    if predictor.cfg.DATASETS.TRAIN:
+        meta = MetadataCatalog.get(predictor.cfg.DATASETS.TRAIN[0])
+
+    # Prepare SAHI tiled model if needed
+    use_tiling = cfg.get("use_tiling", False)
     if use_tiling:
         if not SAHI_AVAILABLE:
             raise RuntimeError("SAHI not installed; cannot use tiled inference.")
         sahi_model = AutoDetectionModel.from_pretrained(
-            model_type="mmdet",
-            model_path=model_type,                 # SAHI expects a detectron2/mmdet name
-            detection_threshold=conf_thresh,
-            device=device,
-            detection_category="instance_segmentation"
+            model_type="detectron2",
+            model_path=str(cfg["weights_path"]),
+            config_path=str(cfg["config_path"]),
+            confidence_threshold=cfg.get("conf_thresh", 0.5),
+            device=cfg.get("device", "cpu"),
         )
 
     all_masks = {}
-
     for img_path in sorted(input_dir.iterdir()):
         if not img_path.is_file():
             continue
+        img_bgr = cv2.imread(str(img_path))
+        if img_bgr is None:
+            continue
 
-        img = cv2.imread(str(img_path))
         if use_tiling:
-            sahi_pred = get_sliced_prediction(
-                str(img_path),
-                sahi_model,
-                slice_height=slice_height,
-                slice_width=slice_width,
-                overlap_height_ratio=overlap_height_ratio,
-                overlap_width_ratio=overlap_width_ratio,
+            # SAHI sliced inference expects RGB
+            img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+            result = get_sliced_prediction(
+                image=img_rgb,
+                detection_model=sahi_model,
+                slice_height=cfg.get("slice_height", 640),
+                slice_width=cfg.get("slice_width", 640),
+                overlap_height_ratio=cfg.get("overlap_height_ratio", 0.2),
+                overlap_width_ratio=cfg.get("overlap_width_ratio", 0.2),
             )
-            masks = [obj.mask for obj in sahi_pred.object_prediction_list]
+            # Use SAHI's visualized output (RGB)
+            annotated = cv2.cvtColor(result.image, cv2.COLOR_RGB2BGR)
+            # Extract binary masks (0/255)
+            masks = []
+            for pred in result.object_prediction_list:
+                mask = getattr(pred.mask, "bool_mask", pred.mask)
+                masks.append((mask.astype(np.uint8) * 255))
         else:
-            masks = detect_maskrcnn_image(model, img, conf_thresh)
+            # Standard Detectron2 inference
+            outputs = predictor(img_bgr)
+            inst = outputs["instances"].to("cpu")
+            if inst.has("pred_masks"):
+                mask_arr = inst.pred_masks.numpy().astype(np.uint8) * 255
+                masks = [m for m in mask_arr]
+            else:
+                masks = []
+            # Render with Detectron2 Visualizer
+            vis = Visualizer(img_bgr[:, :, ::-1], metadata=meta, scale=1.0)
+            vis_output = vis.draw_instance_predictions(inst)
+            annotated = vis_output.get_image()[:, :, ::-1]
 
-        # Annotate & save
-        annotated = annotate_masks(img, masks)
+        # Save annotated image and collect masks
         cv2.imwrite(str(img_out / img_path.name), annotated)
-        all_masks[img_path.name] = [m["mask"] if isinstance(m, dict) else m for m in masks]
+        all_masks[img_path.name] = [m.tolist() for m in masks]
 
-    # Save masks.json
-    save_masks_json(all_masks, output_dir / "masks.json")
+    # Write out masks JSON
+    save_masks_json(all_masks, output_dir / masks_file)
+
+
+def main():
+    cfg = yaml.safe_load(open("config.yaml", "r"))["maskrcnn"]
+    run_maskrcnn(cfg)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser("MaskRCNN batch runner")
-    parser.add_argument("--input-dir",  type=Path, required=True)
-    parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--conf-thresh", type=float, default=0.5)
-    parser.add_argument("--device",      default="cpu")
-    parser.add_argument("--use-tiling", action="store_true",
-                        help="Enable SAHI tiled inference")
-    parser.add_argument("--model-type", type=str,
-                        default="maskrcnn_resnet50_fpn",
-                        help="TorchVision model name")
-    parser.add_argument("--slice-height", type=int, default=640)
-    parser.add_argument("--slice-width",  type=int, default=640)
-    parser.add_argument("--overlap-height-ratio", type=float, default=0.2)
-    parser.add_argument("--overlap-width-ratio",  type=float, default=0.2)
-    args = parser.parse_args()
-
-    run_maskrcnn_detection(
-        input_dir=args.input_dir,
-        output_dir=args.output_dir,
-        conf_thresh=args.conf_thresh,
-        device=args.device,
-        use_tiling=args.use_tiling,
-        model_type=args.model_type,
-        slice_height=args.slice_height,
-        slice_width=args.slice_width,
-        overlap_height_ratio=args.overlap_height_ratio,
-        overlap_width_ratio=args.overlap_width_ratio
-    )
+    main()
